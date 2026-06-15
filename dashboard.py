@@ -82,15 +82,33 @@ def get_gcs_token() -> str:
     return credentials.token
 
 
-def get_gcs_bucket() -> str:
-    """Get GCS bucket name from env or Streamlit secrets."""
-    bucket = os.getenv("GCS_BUCKET_NAME", "")
-    if not bucket:
-        try:
-            bucket = st.secrets.get("GCS_BUCKET_NAME", "")
-        except Exception:
-            pass
-    return bucket
+def get_gcs_token() -> str:
+    """Get a GCS access token using service account key from Streamlit secrets or default credentials."""
+    try:
+        # Try Streamlit secrets first (for Streamlit Cloud deployment)
+        import google.oauth2.service_account
+        import google.auth.transport.requests
+        secret = st.secrets.get("gcp_service_account", {})
+        if secret:
+            credentials = google.oauth2.service_account.Credentials.from_service_account_info(
+                dict(secret),
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            return credentials.token
+    except Exception:
+        pass
+
+    # Fall back to default credentials (for Cloud Run / local)
+    import google.auth
+    import google.auth.transport.requests
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google.auth.transport.requests.Request()
+    credentials.refresh(auth_req)
+    return credentials.token
 
 
 def read_gcs_file(bucket_name: str, blob_name: str) -> str:
