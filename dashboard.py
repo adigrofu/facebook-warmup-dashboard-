@@ -21,6 +21,7 @@ Required .secrets.env:
 import io
 import json
 import os
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
@@ -69,7 +70,63 @@ def load_env_file(path: str) -> None:
                 os.environ[key] = value
 
 
+def get_gcs_token() -> str:
+    """Get a GCS access token using application default credentials."""
+    import google.auth
+    import google.auth.transport.requests
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google.auth.transport.requests.Request()
+    credentials.refresh(auth_req)
+    return credentials.token
+
+
+def get_gcs_bucket() -> str:
+    """Get GCS bucket name from env or Streamlit secrets."""
+    bucket = os.getenv("GCS_BUCKET_NAME", "")
+    if not bucket:
+        try:
+            bucket = st.secrets.get("GCS_BUCKET_NAME", "")
+        except Exception:
+            pass
+    return bucket
+
+
+def read_gcs_file(bucket_name: str, blob_name: str) -> str:
+    """Read a file from GCS and return its contents as a string."""
+    token = get_gcs_token()
+    url = f"https://storage.googleapis.com/storage/v1/b/{bucket_name}/o/{blob_name}?alt=media"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.read().decode()
+
+
+def write_gcs_file(bucket_name: str, blob_name: str, content: str) -> None:
+    """Write a string to a GCS file."""
+    token = get_gcs_token()
+    url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket_name}/o?uploadType=media&name={blob_name}"
+    data = content.encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        r.read()
+
+
 def load_config() -> Dict[str, Any]:
+    bucket_name = get_gcs_bucket()
+    if bucket_name:
+        try:
+            return json.loads(read_gcs_file(bucket_name, "pages_config.json"))
+        except Exception as e:
+            st.warning(f"Could not load pages_config.json from GCS: {e}")
     if not os.path.exists(CONFIG_PATH):
         return {}
     with io.open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -77,11 +134,24 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(config: Dict[str, Any]) -> None:
+    bucket_name = get_gcs_bucket()
+    if bucket_name:
+        try:
+            write_gcs_file(bucket_name, "pages_config.json", json.dumps(config, indent=2, ensure_ascii=False))
+            return
+        except Exception as e:
+            st.warning(f"Could not save pages_config.json to GCS: {e}")
     with io.open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 def load_blacklist() -> Dict[str, Any]:
+    bucket_name = get_gcs_bucket()
+    if bucket_name:
+        try:
+            return json.loads(read_gcs_file(bucket_name, "blacklist.json"))
+        except Exception as e:
+            st.warning(f"Could not load blacklist.json from GCS: {e}")
     if not os.path.exists(BLACKLIST_PATH):
         return {"blacklisted_pages": {}}
     with io.open(BLACKLIST_PATH, "r", encoding="utf-8") as f:
@@ -89,6 +159,13 @@ def load_blacklist() -> Dict[str, Any]:
 
 
 def save_blacklist(blacklist: Dict[str, Any]) -> None:
+    bucket_name = get_gcs_bucket()
+    if bucket_name:
+        try:
+            write_gcs_file(bucket_name, "blacklist.json", json.dumps(blacklist, indent=2, ensure_ascii=False))
+            return
+        except Exception as e:
+            st.warning(f"Could not save blacklist.json to GCS: {e}")
     with io.open(BLACKLIST_PATH, "w", encoding="utf-8") as f:
         json.dump(blacklist, f, indent=2, ensure_ascii=False)
 
@@ -98,13 +175,6 @@ def is_blacklisted(page_id: str, blacklist: Dict[str, Any]) -> bool:
 
 
 def filter_out_blacklisted(pages: Dict[str, Any], blacklist: Dict[str, Any]) -> Dict[str, Any]:
-    """Hide blacklisted pages from a view WITHOUT deleting their config.
-
-    Blacklisting must never destroy a page's saved settings, so that Restore
-    can bring the page back exactly as it was. Enforcement is read-time only:
-    blacklisted pages are excluded from the queues here and skipped by the
-    posting worker, but their entry stays in pages_config.json untouched.
-    """
     return {
         pid: data
         for pid, data in pages.items()
@@ -127,7 +197,7 @@ def fetch_owned_pages(token: str, business_id: str) -> List[Dict[str, str]]:
         payload = r.json()
         pages.extend(payload.get("data", []))
         url = payload.get("paging", {}).get("next")
-        params = None  # paging.next already contains query params
+        params = None
 
     return pages
 
@@ -154,7 +224,6 @@ def sync_pages_to_config(meta_pages: List[Dict[str, str]], config: Dict[str, Any
             }
             added_count += 1
         else:
-            # Keep name updated if it changes in Meta, but do not overwrite user settings.
             config[page_id]["page_name"] = page_name
             config[page_id]["page_id"] = page_id
 
@@ -240,8 +309,21 @@ def render_page_editor(page_id: str, data: Dict[str, Any], key_prefix: str) -> D
 
 def main() -> None:
     load_env_file(ENV_PATH)
+
+    # Read from env or Streamlit secrets
     token = os.getenv("META_SYSTEM_USER_TOKEN", "")
+    if not token:
+        try:
+            token = st.secrets.get("META_SYSTEM_USER_TOKEN", "")
+        except Exception:
+            pass
+
     business_id = os.getenv("META_BUSINESS_ID", "")
+    if not business_id:
+        try:
+            business_id = st.secrets.get("META_BUSINESS_ID", "")
+        except Exception:
+            pass
 
     st.set_page_config(page_title="Page Warmup Manager", layout="wide")
     st.title("Page Warmup Manager")
@@ -257,8 +339,6 @@ def main() -> None:
     config = load_config()
     blacklist = load_blacklist()
 
-    # Counts reflect only pages that are actually actionable (blacklisted pages
-    # are hidden from the queues and skipped by the worker, so they don't count).
     visible = filter_out_blacklisted(config, blacklist)
 
     top1, top2, top3, top4 = st.columns(4)
