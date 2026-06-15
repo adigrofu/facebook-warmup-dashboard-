@@ -1,0 +1,22 @@
+# ─── Secrets — NEVER commit these ───────────────────────────────
+.secrets.env
+*.env
+!*.env.example
+
+# ─── Local, per-machine state (managed by the dashboard / worker) ──
+pages_config.json
+pages_config.json.bak
+schedule.json
+
+# ─── Content library lives in OneDrive (path set in .secrets.env) ──
+# Never keep a copy inside the project folder.
+content_library/
+
+# ─── Python / OS noise ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+*.log
