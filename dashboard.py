@@ -2,20 +2,6 @@
 """
 Streamlit Dashboard for Meta Page Warmup Configuration
 ======================================================
-
-What this dashboard does:
-1. Fetches all pages owned by your Meta Business Manager.
-2. Adds newly discovered pages into pages_config.json automatically.
-3. Shows only unconfigured pages in a "New Pages Queue".
-4. Lets non-tech users assign Page Type, Theme, Active status, and Posts/Day.
-5. Saves everything back to pages_config.json.
-
-Run:
-    streamlit run dashboard.py
-
-Required .secrets.env:
-    META_SYSTEM_USER_TOKEN=your_token_here
-    META_BUSINESS_ID=587291318723707
 """
 
 import io
@@ -71,27 +57,14 @@ def load_env_file(path: str) -> None:
 
 
 def get_gcs_token() -> str:
-    """Get a GCS access token using application default credentials."""
-    import google.auth
-    import google.auth.transport.requests
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    auth_req = google.auth.transport.requests.Request()
-    credentials.refresh(auth_req)
-    return credentials.token
-
-
-def get_gcs_token() -> str:
-    """Get a GCS access token using service account key from Streamlit secrets or default credentials."""
+    """Get GCS token from Streamlit secrets (service account) or default credentials."""
     try:
-        # Try Streamlit secrets first (for Streamlit Cloud deployment)
         import google.oauth2.service_account
         import google.auth.transport.requests
-        secret = st.secrets.get("gcp_service_account", {})
+        secret = dict(st.secrets.get("gcp_service_account", {}))
         if secret:
             credentials = google.oauth2.service_account.Credentials.from_service_account_info(
-                dict(secret),
+                secret,
                 scopes=["https://www.googleapis.com/auth/cloud-platform"]
             )
             auth_req = google.auth.transport.requests.Request()
@@ -99,8 +72,6 @@ def get_gcs_token() -> str:
             return credentials.token
     except Exception:
         pass
-
-    # Fall back to default credentials (for Cloud Run / local)
     import google.auth
     import google.auth.transport.requests
     credentials, _ = google.auth.default(
@@ -111,8 +82,18 @@ def get_gcs_token() -> str:
     return credentials.token
 
 
+def get_gcs_bucket() -> str:
+    """Get GCS bucket name from env or Streamlit secrets."""
+    bucket = os.getenv("GCS_BUCKET_NAME", "")
+    if not bucket:
+        try:
+            bucket = st.secrets["GCS_BUCKET_NAME"]
+        except Exception:
+            bucket = ""
+    return bucket
+
+
 def read_gcs_file(bucket_name: str, blob_name: str) -> str:
-    """Read a file from GCS and return its contents as a string."""
     token = get_gcs_token()
     url = f"https://storage.googleapis.com/storage/v1/b/{bucket_name}/o/{blob_name}?alt=media"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -121,17 +102,12 @@ def read_gcs_file(bucket_name: str, blob_name: str) -> str:
 
 
 def write_gcs_file(bucket_name: str, blob_name: str, content: str) -> None:
-    """Write a string to a GCS file."""
     token = get_gcs_token()
     url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket_name}/o?uploadType=media&name={blob_name}"
     data = content.encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        url, data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -193,22 +169,13 @@ def is_blacklisted(page_id: str, blacklist: Dict[str, Any]) -> bool:
 
 
 def filter_out_blacklisted(pages: Dict[str, Any], blacklist: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        pid: data
-        for pid, data in pages.items()
-        if not is_blacklisted(pid, blacklist)
-    }
+    return {pid: data for pid, data in pages.items() if not is_blacklisted(pid, blacklist)}
 
 
 def fetch_owned_pages(token: str, business_id: str) -> List[Dict[str, str]]:
     pages: List[Dict[str, str]] = []
     url = f"{GRAPH_BASE_URL}/{business_id}/owned_pages"
-    params = {
-        "access_token": token,
-        "fields": "id,name",
-        "limit": 500,
-    }
-
+    params = {"access_token": token, "fields": "id,name", "limit": 500}
     while url:
         r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
@@ -216,7 +183,6 @@ def fetch_owned_pages(token: str, business_id: str) -> List[Dict[str, str]]:
         pages.extend(payload.get("data", []))
         url = payload.get("paging", {}).get("next")
         params = None
-
     return pages
 
 
@@ -227,41 +193,26 @@ def sync_pages_to_config(meta_pages: List[Dict[str, str]], config: Dict[str, Any
         page_name = page.get("name", "")
         if not page_id:
             continue
-
         if page_id not in config:
             config[page_id] = {
-                "page_id": page_id,
-                "page_name": page_name,
-                "page_type": None,
-                "theme": None,
-                "enabled": False,
-                "posts_per_day": 1,
-                "discovered_at": now_iso(),
-                "configured_at": None,
-                "last_posted_at": None,
+                "page_id": page_id, "page_name": page_name,
+                "page_type": None, "theme": None, "enabled": False,
+                "posts_per_day": 1, "discovered_at": now_iso(),
+                "configured_at": None, "last_posted_at": None,
             }
             added_count += 1
         else:
             config[page_id]["page_name"] = page_name
             config[page_id]["page_id"] = page_id
-
     return added_count
 
 
 def get_new_pages(config: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        page_id: data
-        for page_id, data in config.items()
-        if not data.get("configured_at")
-    }
+    return {pid: data for pid, data in config.items() if not data.get("configured_at")}
 
 
 def get_configured_pages(config: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        page_id: data
-        for page_id, data in config.items()
-        if data.get("configured_at")
-    }
+    return {pid: data for pid, data in config.items() if data.get("configured_at")}
 
 
 def theme_options_for(page_type: str) -> Dict[str, str]:
@@ -273,73 +224,52 @@ def theme_options_for(page_type: str) -> Dict[str, str]:
 def render_page_editor(page_id: str, data: Dict[str, Any], key_prefix: str) -> Dict[str, Any]:
     st.markdown(f"**{data.get('page_name', 'Unknown Page')}**")
     st.caption(f"Page ID: {page_id}")
-
     c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-
     current_page_type = data.get("page_type") or "animals_pets"
     page_type = c1.selectbox(
-        "Page Type",
-        options=list(PAGE_TYPES.keys()),
+        "Page Type", options=list(PAGE_TYPES.keys()),
         format_func=lambda x: PAGE_TYPES[x],
         index=list(PAGE_TYPES.keys()).index(current_page_type) if current_page_type in PAGE_TYPES else 0,
         key=f"{key_prefix}_page_type_{page_id}",
     )
-
     theme_options = theme_options_for(page_type)
     current_theme = data.get("theme")
     theme_keys = list(theme_options.keys())
     if current_theme not in theme_keys:
         current_theme = theme_keys[0] if theme_keys else None
-
     theme = c2.selectbox(
-        "Theme",
-        options=theme_keys,
+        "Theme", options=theme_keys,
         format_func=lambda x: theme_options[x],
         index=theme_keys.index(current_theme) if current_theme in theme_keys else 0,
         key=f"{key_prefix}_theme_{page_id}",
     ) if theme_keys else None
-
-    enabled = c3.checkbox(
-        "Active",
-        value=bool(data.get("enabled", False)),
-        key=f"{key_prefix}_enabled_{page_id}",
-    )
-
+    enabled = c3.checkbox("Active", value=bool(data.get("enabled", False)), key=f"{key_prefix}_enabled_{page_id}")
     posts_per_day = c4.number_input(
-        "Posts/Day",
-        min_value=0,
-        max_value=20,
-        value=int(data.get("posts_per_day", 1)),
-        step=1,
+        "Posts/Day", min_value=0, max_value=20,
+        value=int(data.get("posts_per_day", 1)), step=1,
         key=f"{key_prefix}_ppd_{page_id}",
     )
-
     return {
-        **data,
-        "page_id": page_id,
-        "page_name": data.get("page_name", ""),
-        "page_type": page_type,
-        "theme": theme,
-        "enabled": bool(enabled),
-        "posts_per_day": int(posts_per_day),
+        **data, "page_id": page_id, "page_name": data.get("page_name", ""),
+        "page_type": page_type, "theme": theme,
+        "enabled": bool(enabled), "posts_per_day": int(posts_per_day),
     }
 
 
 def main() -> None:
     load_env_file(ENV_PATH)
 
-    # Read from env or Streamlit secrets
     token = os.getenv("META_SYSTEM_USER_TOKEN", "")
     if not token:
         try:
-            token = st.secrets.get("META_SYSTEM_USER_TOKEN", "")
+            token = st.secrets["META_SYSTEM_USER_TOKEN"]
         except Exception:
             pass
 
     business_id = os.getenv("META_BUSINESS_ID", "")
     if not business_id:
         try:
-            business_id = st.secrets.get("META_BUSINESS_ID", "")
+            business_id = st.secrets["META_BUSINESS_ID"]
         except Exception:
             pass
 
@@ -356,7 +286,6 @@ def main() -> None:
 
     config = load_config()
     blacklist = load_blacklist()
-
     visible = filter_out_blacklisted(config, blacklist)
 
     top1, top2, top3, top4 = st.columns(4)
@@ -368,12 +297,7 @@ def main() -> None:
     if st.button("Sync Pages From Meta", type="primary"):
         try:
             meta_pages = fetch_owned_pages(token, business_id)
-
-            meta_pages = [
-                page for page in meta_pages
-                if not is_blacklisted(str(page.get("id")), blacklist)
-            ]
-
+            meta_pages = [p for p in meta_pages if not is_blacklisted(str(p.get("id")), blacklist)]
             added = sync_pages_to_config(meta_pages, config)
             save_config(config)
             st.success(f"Synced {len(meta_pages)} pages. Added {added} new pages.")
@@ -388,7 +312,6 @@ def main() -> None:
     with tab_new:
         st.subheader("New Pages Requiring Setup")
         new_pages = filter_out_blacklisted(get_new_pages(config), blacklist)
-
         if not new_pages:
             st.success("No new pages need setup.")
         else:
@@ -397,7 +320,6 @@ def main() -> None:
             for page_id, data in sorted(new_pages.items(), key=lambda item: item[1].get("page_name", "")):
                 with st.container(border=True):
                     updates[page_id] = render_page_editor(page_id, data, "new")
-
             if st.button("Save New Pages", type="primary"):
                 for page_id, updated in updates.items():
                     updated["configured_at"] = now_iso()
@@ -415,14 +337,12 @@ def main() -> None:
             options=["all"] + list(PAGE_TYPES.keys()),
             format_func=lambda x: "All" if x == "all" else PAGE_TYPES[x],
         )
-
         filtered = configured_pages
         if search.strip():
             s = search.lower().strip()
             filtered = {pid: d for pid, d in filtered.items() if s in d.get("page_name", "").lower() or s in pid}
         if page_type_filter != "all":
             filtered = {pid: d for pid, d in filtered.items() if d.get("page_type") == page_type_filter}
-
         if not filtered:
             st.warning("No configured pages found for this filter.")
         else:
@@ -430,7 +350,6 @@ def main() -> None:
             for page_id, data in sorted(filtered.items(), key=lambda item: item[1].get("page_name", "")):
                 with st.container(border=True):
                     updates[page_id] = render_page_editor(page_id, data, "all")
-
             if st.button("Save All Page Changes"):
                 for page_id, updated in updates.items():
                     if not updated.get("configured_at"):
@@ -444,20 +363,14 @@ def main() -> None:
         st.subheader("Blacklisted Pages")
         blacklist = load_blacklist()
         blacklisted_pages = blacklist.get("blacklisted_pages", {})
-
         st.metric("Blacklisted Pages", len(blacklisted_pages))
-
         if not blacklisted_pages:
             st.success("No pages are blacklisted.")
         else:
-            for page_id, data in sorted(
-                blacklisted_pages.items(),
-                key=lambda item: item[1].get("page_name", "")
-            ):
+            for page_id, data in sorted(blacklisted_pages.items(), key=lambda item: item[1].get("page_name", "")):
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"**{data.get('page_name', 'Unknown Page')}**")
                 c1.caption(f"Page ID: {page_id}")
-
                 if c2.button("Restore", key=f"restore_{page_id}"):
                     blacklisted_pages.pop(page_id, None)
                     blacklist["blacklisted_pages"] = blacklisted_pages
@@ -474,14 +387,12 @@ def main() -> None:
             save_config(config)
             st.warning("All pages disabled.")
             st.rerun()
-
         if c2.button("Enable Only Animals & Pets"):
             for page in config.values():
                 page["enabled"] = page.get("page_type") == "animals_pets" and bool(page.get("theme"))
             save_config(config)
             st.success("Only configured Animals & Pets pages are enabled.")
             st.rerun()
-
         st.download_button(
             "Download pages_config.json",
             data=json.dumps(config, indent=2, ensure_ascii=False),
